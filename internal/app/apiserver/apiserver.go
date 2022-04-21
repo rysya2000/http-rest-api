@@ -1,49 +1,82 @@
 package apiserver
 
 import (
-	"io"
-	"log"
+	"database/sql"
+	"fmt"
+	"io/ioutil"
 	"net/http"
-	"os"
+	"path"
+
+	"github.com/go-redis/redis"
+	"github.com/rysya2000/http-rest-api/internal/app/store/sqlstore"
 )
 
-type APIServer struct {
-	config   *Config
-	errorLog *log.Logger
-	infoLog  *log.Logger
-	router   *http.ServeMux
+// routers
+type pathResolver struct {
+	Handlers map[string]http.HandlerFunc
 }
 
-// возможна ошибка в наименовании зависимостей с Большой буквы
+func newPathResolver() *pathResolver {
+	return &pathResolver{make(map[string]http.HandlerFunc)}
+}
 
-func New(config *Config) *APIServer {
-	infoLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
-	errorLog := log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+func (p *pathResolver) Add(path string, handler http.HandlerFunc) {
+	p.Handlers[path] = handler
+}
 
-	return &APIServer{
-		config:   config,
-		errorLog: errorLog,
-		infoLog:  infoLog,
-		router:   http.NewServeMux(),
+func (p *pathResolver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	check := r.Method + " " + r.URL.Path
+
+	for pattern, handlerFunc := range p.Handlers {
+		ok, err := path.Match(pattern, check)
+		if ok && err == nil {
+			handlerFunc(w, r)
+			return
+		} else if err != nil {
+			fmt.Fprint(w, err)
+		}
 	}
+
+	http.NotFound(w, r)
 }
 
-func (s *APIServer) Start() error {
-	s.configureRouter()
-
-	s.infoLog.Printf("Server: http://localhost%v", s.config.BindAddr)
-
-	return http.ListenAndServe(s.config.BindAddr, s.router)
-}
-
-// func (s *APIServer) configureLogger() error {}
-
-func (s *APIServer) configureRouter() {
-	s.router.HandleFunc("/hello", s.handleHello())
-}
-
-func (s *APIServer) handleHello() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "Hello")
+func Start(config *Config) error {
+	db, err := newDB(config.DatabaseURL)
+	if err != nil {
+		return err
 	}
+
+	defer db.Close()
+
+	store := sqlstore.New(db)
+	sessionStore := redis.NewClient(&redis.Options{
+		Addr:     "localhost:" + config.RedisLocalhost,
+		Password: "",
+		DB:       0,
+	})
+	srv := newServer(store, *sessionStore)
+
+	return http.ListenAndServe(config.BindAddr, srv)
+}
+
+func newDB(databaseURL string) (*sql.DB, error) {
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
+	query, err := ioutil.ReadFile("./migrations/up.sql")
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := db.Exec(string(query)); err != nil {
+		return nil, err
+	}
+
+	return db, nil
 }

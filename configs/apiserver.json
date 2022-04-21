@@ -1,3 +1,5 @@
 {
-    "bind_addr": ":8080"
+    "bind_addr": ":8080",
+    "database_url": "host=localhost port=5432 user=postgres password=Qwerty123 dbname=postgres sslmode=disable",
+    "redislocalhost": "6379"
 }
